@@ -119,6 +119,13 @@ class Algorithm_Count:
             self.register_movement(self.poly_area1, self.poly_area2, self.peopleExiting, self.exiting, x1, y1, x2, y2, box_id, frame)
         self.draw_polylines(frame)
 
+    def reset(self):
+        self.peopleEntering.clear()
+        self.entering.clear()
+        self.peopleExiting.clear()
+        self.exiting.clear()
+        self.start_time = time.time()
+
     def main(self):
         cap = cv2.VideoCapture(self.file_path)
         while True:
