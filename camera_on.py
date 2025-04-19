@@ -5,15 +5,35 @@ import datetime
 import os
 import pickle
 import zlib
-import threading
 from queue import Queue
 
-from PySide6.QtCore import QTimer, Qt
+from PySide6.QtCore import QTimer, Qt, QThread, Signal
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import QApplication, QMainWindow
 from main_ui import Ui_MainWindow
 from counter_mod import Algorithm_Count
 from set_entry import Get_Coordinates
+
+
+class FrameCaptureThread(QThread):
+    frame_ready = Signal(tuple)  # Signal to emit frame data
+    
+    def __init__(self, frame_generator):
+        super().__init__()
+        self.frame_generator = frame_generator
+        self.running = True
+        
+    def run(self):
+        try:
+            while self.running:
+                frame_data = next(self.frame_generator)
+                self.frame_ready.emit(frame_data)
+        except StopIteration:
+            pass
+            
+    def stop(self):
+        self.running = False
+        self.wait()
 
 
 class CameraFeedWindow(QMainWindow):
@@ -24,7 +44,7 @@ class CameraFeedWindow(QMainWindow):
         self.ui.stop_btn.setEnabled(False)
 
         self.file_path = 'Sample Test File\\test_video.mp4'
-        self.frame_queue = Queue(maxsize=1)
+        self.capture_thread = None
 
         self.ui.start_btn.clicked.connect(self.start_feed)
         self.ui.stop_btn.clicked.connect(self.stop_feed)
@@ -32,10 +52,12 @@ class CameraFeedWindow(QMainWindow):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_frame)
 
+        self.ignore_cap = False  # Ignore update_cap for first few frames
+
     def start_feed(self):
         self.running = False  # stop any previous loop
-        while not self.frame_queue.empty():
-            self.frame_queue.get()
+        if self.capture_thread:
+            self.capture_thread.stop()
 
         self.ui.cap_1.clear()
         self.ui.cap_2.clear()
@@ -48,14 +70,18 @@ class CameraFeedWindow(QMainWindow):
         self.a2 = area.get_coordinates(self.a2, self.a1, 2)
 
         if self.a1 and self.a2:
+            self.ignore_cap = True
             self.running = True
 
-            # 🔁 Re-create algorithm to reset memory
-            self.algo = Algorithm_Count(self.file_path, self.a1, self.a2, (self.ui.label.width(), self.ui.label.height()))
+            # Re-create algorithm to reset memory
+            self.algo = Algorithm_Count(self.file_path, self.a1, self.a2, 
+                                      (self.ui.label.width(), self.ui.label.height()))
+            self.algo.reset()
             self.frame_generator = self.algo.main()
 
             # Start fresh capture thread
-            self.capture_thread = threading.Thread(target=self.capture_frames, daemon=True)
+            self.capture_thread = FrameCaptureThread(self.frame_generator)
+            self.capture_thread.frame_ready.connect(self.handle_frame)
             self.capture_thread.start()
 
             self.timer.start(30)
@@ -63,33 +89,28 @@ class CameraFeedWindow(QMainWindow):
             self.ui.stop_btn.setEnabled(True)
         else:
             print("Coordinates not set.")
-        return
 
-
-    def capture_frames(self):
-        try:
-            while self.running:
-                frame_data = next(self.frame_generator)
-                if self.frame_queue.full():
-                    self.frame_queue.get()
-                self.frame_queue.put(frame_data)
-        except StopIteration:
-            pass
+    def handle_frame(self, frame_data):
+        # Store the latest frame for the timer to process
+        self.last_frame_data = frame_data
 
     def update_frame(self):
-        if not self.frame_queue.empty():
-            frame, result = self.frame_queue.get()
+        if hasattr(self, 'last_frame_data'):
+            frame, result = self.last_frame_data
             self.last_result = result  # Save for use in other functions
             self.show_face_crops(frame, self.ui.label)
             self.update_cap(result)
             self.save_crop_faces(result)
 
+            self.ignore_cap = False
+
     def stop_feed(self):
         self.running = False
         self.timer.stop()
 
-        while not self.frame_queue.empty():
-            self.frame_queue.get()
+        if self.capture_thread:
+            self.capture_thread.stop()
+            self.capture_thread = None
 
         self.ui.label.setPixmap(QPixmap())
         self.ui.cap_1.setPixmap(QPixmap())
@@ -132,6 +153,9 @@ class CameraFeedWindow(QMainWindow):
         name_label.setPixmap(face_pixmap)
 
     def update_cap(self, result):
+        if self.ignore_cap:
+            self.ignore_cap = False
+            return
         temp = []
         for person_id, details in result['entering_details'].items():
             temp.insert(0, details['face_crops'])
@@ -150,7 +174,7 @@ class CameraFeedWindow(QMainWindow):
                 print(f"Error showing face crops: {e}")
 
     def closeEvent(self, event):
-        self.timer.stop()
+        self.stop_feed()
         event.accept()
 
 
